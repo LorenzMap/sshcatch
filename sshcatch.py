@@ -15,7 +15,7 @@ from itertools import count
 
 import asyncssh
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # ── Logging ─--────────────────────────────────────────────────────────
 
@@ -100,7 +100,8 @@ class SFTPCatchServer(asyncssh.SFTPServer):
 
     def _require_flat(self, path):
         # Simple check if subdirectories are used - full 'name' must be equal to basename
-        name = path.lstrip(b"/")
+        #   after unecessary ./ are collapsed
+        name = posixpath.normpath(path).lstrip(b"/")
         if name in (b"", b".", b"..") or name != posixpath.basename(name):
             self._log_scp(f"DENIED ACCESS {path.decode(errors='replace')}")
             raise DENY("Access restricted to root directory")

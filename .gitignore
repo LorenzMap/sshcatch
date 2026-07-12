@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# sshcatch runtime files - never commit these
+#   generated host keys (default and custom --host-key names)
+*_host_key
+#   log files from -o/--output
+*.log

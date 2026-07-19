@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Security",
     "Topic :: System :: Networking",
 ]
-dependencies = ["asyncssh>=2.15"]
+dependencies = ["asyncssh>=2.21.0,<2.25.0"]
 
 [project.urls]
 Homepage = "https://github.com/LorenzMap/sshcatch"

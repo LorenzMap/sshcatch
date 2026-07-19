@@ -1,59 +1,89 @@
 # sshcatch
 
-A quick-deploy SSH server for tunneling (local/remote/dynamic) and simple SCP
-transfers - it NEVER opens a shell.
+A quick-deploy SSH server for tunneling (local/remote/dynamic) and simple SCP /
+SFTP transfers - it **never opens a shell**.
 
-By default all features are disabled: connections are logged and closed. 
-Turn on what you need with the flags described below. Handy on an engagement
-when you want a controlled SSH endpoint without using a full `sshd`.
+By default all features are disabled: connections are logged and closed. Turn on
+only what you need with the flags described below. Handy on an engagement when
+you want a controlled SSH endpoint (a tunnel relay or a file drop) without 
+setting up a full `sshd`.
 
 Built on [asyncssh](https://github.com/ronf/asyncssh).
 
+This is a pentesting tool. Only point it at systems and networks you are authorized 
+to test.
+
 ## Install
+
+With `pipx` (recommended, installs into an isolated environment and puts
+`sshcatch` on your `PATH`):
+
+```
+pipx install sshcatch
+```
+
+With `pip`:
 
 ```
 pip install sshcatch
 ```
 
-Or from source:
+From source:
 
 ```
 git clone https://github.com/LorenzMap/sshcatch
 cd sshcatch
-pip install .
+pipx install .          # or: pip install .
 ```
 
 Needs Python 3.10+. A host key is auto-generated in the working directory on
 first run (or point `--host-key` at your own).
 
-## Usage
+## How it works
 
-Because no shell is created on the server **always** use the `-N` flag on 
-your tunnel connections or you get disconnected instantly! 
+Without any flags sshcatch is in **log-only** mode: It accepts the
+connection, records the client version, username, offered passwords and public
+keys, then closes. Nothing else is enabled until you ask for it.
 
-The SCP directory does intentionally **NOT** support subdirectories! 
+Adjust the amount of logging using `-vv` and `-q`. Or put everything into a 
+logfile using `-o`.
 
-Log-only - just capture creds and full public keys:
+#### Tunnels
+
+Because no shell is ever created, tunnel clients **must** pass `-N` (e.g.
+`ssh -NL ...`) or they get disconnected instantly.
+
+Turning tunneling on with `--open-auth` means **anyone** who connects can pivot
+through your host!
+
+#### SCP / SFTP
+
+**Symlinks** are handled very restrictively: On upload they create a placeholder file
+that contains the original target. On download they are outright denied. 
+
+The host key, `authorized_keys`, logfile and the sshcatch script itself are **protected** 
+and hidden when they live inside the SCP directory.
+
+Uploads **never overwrite** an existing file. The new file gets a numeric suffix 
+(`loot.tar` -> `loot_1.tar`). Non-existent parent folders are created.
+
+Renames and Remove operations are denied.
+
+## Examples
+
+Let one user pull/put files from the current directory via SCP/SFTP:
 
 ```
 # Server
-sshcatch -K
-
-# Client
-ssh user@host
-```
-
-Let one user pull files via SCP/SFTP:
-
-```
-# Server
-sshcatch -u user:pass --scp-download
+sshcatch -u user:pass --scp-download --scp-upload
 
 # Client
 scp user@host:secret.txt .
+scp -r loot/ user@host:pete/pc/
+sftp user@host
 ```
 
-Let anyone tunnel through the server (local and dynamic forwards):
+Let anyone tunnel through the server (local and dynamic forwards): **Be careful with this one!**
 
 ```
 # Server
@@ -64,8 +94,21 @@ ssh -NL 8080:internal:80 user@host      # local forward
 ssh -ND 1080 user@host                  # dynamic (SOCKS)
 ```
 
-My favorite one - reverse tunnel and SCP uploads for the keys in
-`./authorized-keys`, while posing as a ubuntu SSH server on port 2222:
+Using single-mode to return something to the first successful authentication
+by closing the server afterwards, while printing timestamped logs to the console
+and saving them into a file:
+
+```
+# Server
+sshcatch -1 -u arthur:42 --version-banner debian \
+         --pre-auth-banner "What is the answer to life the universe and everything" \
+         --post-auth-banner "flag{So_Long_and_Thanks_for_All_the_Fish}" \
+         -o sshcatch.log -t
+```
+
+
+My favorite one: Reverse tunnel and SCP uploads for the keys in
+`./authorized-keys` while posing as an Ubuntu SSH server on port 2222:
 
 ```
 # Server
@@ -76,15 +119,16 @@ ssh -NR 9000:localhost:22 user@host -p 2222     # reverse tunnel
 scp -P 2222 loot.tar user@host:.                # upload
 ```
 
+
 ## Options
 
 ```
-usage: sshcatch [-h] [--version] [-p PORT] [-b BIND] [--host-key FILE]
-                [-u USER:PASS] [--open-auth] [--authorized-keys FILE] [-K]
+usage: sshcatch [-h] [--version] [-p PORT] [-b BIND] [--host-key FILE] [-1]
+                [-u USER:PASS] [--open-auth] [--authorized-keys FILE]
                 [--forward] [--reverse] [--scp-upload] [--scp-download]
                 [--scp-dir DIR] [--version-banner STRING]
                 [--pre-auth-banner STRING] [--post-auth-banner STRING]
-                [-o FILE] [-t] [--plain]
+                [-q | -v] [-o FILE] [-t] [--plain]
 
 options:
   -h, --help            show this help message and exit
@@ -92,6 +136,8 @@ options:
   -p PORT, --port PORT  listen port (default: 22)
   -b BIND, --bind BIND  bind address (default: all IPv4/v6 interfaces)
   --host-key FILE       server host key file (default: auto-generate)
+  -1, --single          close the listener after first successful
+                        authentication (and exit when that connection ends)
 
 authentication:
   -u USER:PASS, --user USER:PASS
@@ -100,21 +146,20 @@ authentication:
   --authorized-keys FILE
                         authorized_keys file for key auth (username
                         independent)
-  -K, --full-keys       log the full offered public key, not just its
-                        fingerprint
 
 tunneling:
   --forward             enable forward tunnels (client: ssh -NL / -ND)
   --reverse             enable reverse tunnels (client: ssh -NR)
 
-SCP / file transfer:
-  --scp-upload          enable file upload (SCP/SFTP write) - subdirectories
-                        are disabled - files get suffix instead of overwriting
-  --scp-download        enable file download (SCP/SFTP read) - subdirectories
-                        are disabled
-  --scp-dir DIR         directory for SCP/SFTP (default: cwd) - subdirectories
-                        are disabled - host-key (and optional authorized_keys
-                        and logfile) are protected
+SCP / SFTP file transfer:
+  --scp-upload          enable file upload (SCP/SFTP write) - files get suffix
+                        instead of overwriting - symlinks become placeholder
+                        files
+  --scp-download        enable file download (SCP/SFTP read) - symlinks are
+                        denied
+  --scp-dir DIR         directory for SCP/SFTP (default: cwd) - sensitive
+                        files (host-key, authorized_keys, logfile) are
+                        protected
 
 banners:
   --version-banner STRING
@@ -128,19 +173,14 @@ banners:
                         successfully
 
 logging:
+  -q, --quiet           print nothing on console
+  -v, --verbose         print additional information to the console
+                        (repeatable)
   -o FILE, --output FILE
                         append the log to FILE (plain with timestamps)
   -t, --timestamps      prefix console lines with a timestamp
   --plain               disable ANSI colors on the console
 ```
-
-## A word of warning
-
-- This is a pentesting tool. Only point it at systems and networks you are
-authorized to test. 
-
-- `--open-auth --forward` means ANYONE can tunnel through
-your host - know what you're exposing before you run it.
 
 ## License
 

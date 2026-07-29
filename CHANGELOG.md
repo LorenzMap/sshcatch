@@ -4,6 +4,38 @@ All notable changes to **sshcatch** are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-07-29
+
+Forwarding hardening and help/logging polish.
+
+### Added
+
+- **Non-TCP forwarding is now explicitly denied and logged.** UNIX-domain-socket
+  forwards (`unix_connection_requested` / `unix_server_requested`) and layer-2/3
+  TUN/TAP tunnels (`tun_requested` / `tap_requested`) are overridden to refuse
+  and log the attempt via a central `_deny_tunnel()` helper (mirroring the SFTP
+  `_deny_sftp`), instead of relying on asyncssh's silent default rejection. Only
+  plain TCP forwards remain available, and only when `--forward` / `--reverse` is
+  set. A new `log_tunnel()` helper adds a `TUNNEL` log category.
+- **Two-tier `--help`.** `-h` prints a short usage summary (`_epilog_short`);
+  `--help` prints the full reference (`_epilog_full`).
+
+### Changed
+
+- **Denial reasons are logged server-side only, never sent to the client**, so a
+  probing client can't learn the policy from the error text.
+- **Denial log level follows the SFTP convention:** always-denied protocols
+  (UNIX / TUN / TAP) log at INFO (`-v`), while a TCP forward refused only because
+  `--forward` / `--reverse` is off logs at WARNING (default).
+- Internal: the SFTP deny helper was renamed `_deny` → `_deny_sftp` to stay
+  consistent with the new `_deny_tunnel`.
+
+### Security
+
+- Tunnel-denial is now enforced and made visible on every path rather than
+  silently dropped by asyncssh.
+
+
 ## [0.2.0] - 2026-07-19
 
 Large rewrite of the SFTP layer and the logging system.

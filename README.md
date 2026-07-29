@@ -56,6 +56,10 @@ Because no shell is ever created, tunnel clients **must** pass `-N` (e.g.
 Turning tunneling on with `--open-auth` means **anyone** who connects can pivot
 through your host!
 
+Only plain **TCP** forwards are ever available. UNIX-domain-socket forwards
+(`ssh -L /sock:...` / `-R /sock:...`) and TUN/TAP tunnels (`ssh -w`) are always
+denied, even with `--forward` / `--reverse` set.
+
 #### SCP / SFTP
 
 **Symlinks** are handled very restrictively: On upload they create a placeholder file
@@ -67,7 +71,7 @@ and hidden when they live inside the SCP directory.
 Uploads **never overwrite** an existing file. The new file gets a numeric suffix 
 (`loot.tar` -> `loot_1.tar`). Non-existent parent folders are created.
 
-Renames and Remove operations are denied.
+Renames, deletes and directory removal are denied.
 
 ## Examples
 
@@ -122,22 +126,30 @@ scp -P 2222 loot.tar user@host:.                # upload
 
 ## Options
 
+`sshcatch -h` prints a short summary with just the flags you need to get going.
+The full reference below is `sshcatch --help`:
+
 ```
-usage: sshcatch [-h] [--version] [-p PORT] [-b BIND] [--host-key FILE] [-1]
-                [-u USER:PASS] [--open-auth] [--authorized-keys FILE]
-                [--forward] [--reverse] [--scp-upload] [--scp-download]
-                [--scp-dir DIR] [--version-banner STRING]
-                [--pre-auth-banner STRING] [--post-auth-banner STRING]
-                [-q | -v] [-o FILE] [-t] [--plain]
+usage: sshcatch [-h] [--help] [-p PORT] [-b BIND] [-1] [--host-key FILE]
+                [--version] [-u USER:PASS] [--open-auth]
+                [--authorized-keys FILE] [--forward] [--reverse]
+                [--scp-upload] [--scp-download] [--scp-dir DIR]
+                [--version-banner STRING] [--pre-auth-banner STRING]
+                [--post-auth-banner STRING] [-q | -v] [-o FILE] [-t] [--plain]
+
+sshcatch - a quick-deploy SSH server for tunneling (local/remote/dynamic)
+and simple SCP transfers (NEVER opens a shell!).
+By default all features are disabled. Use flags to enable features.
 
 options:
-  -h, --help            show this help message and exit
-  --version             show program's version number and exit
+  -h                    show a short help message and exit
+  --help                show the full help and exit
   -p PORT, --port PORT  listen port (default: 22)
   -b BIND, --bind BIND  bind address (default: all IPv4/v6 interfaces)
+  -1, --single          close the listener after first successful auth (and
+                        exit when that connection ends)
   --host-key FILE       server host key file (default: auto-generate)
-  -1, --single          close the listener after first successful
-                        authentication (and exit when that connection ends)
+  --version             show program's version number and exit
 
 authentication:
   -u USER:PASS, --user USER:PASS
@@ -153,19 +165,19 @@ tunneling:
 
 SCP / SFTP file transfer:
   --scp-upload          enable file upload (SCP/SFTP write) - files get suffix
-                        instead of overwriting - symlinks become placeholder
-                        files
+                        instead of overwriting
   --scp-download        enable file download (SCP/SFTP read) - symlinks are
                         denied
   --scp-dir DIR         directory for SCP/SFTP (default: cwd) - sensitive
-                        files (host-key, authorized_keys, logfile) are
-                        protected
+                        sshcatch files (host-key, authorized_keys, logfile)
+                        are protected
 
 banners:
   --version-banner STRING
-                        sent as 'SSH-2.0-STRING' version banner - presets
-                        (case-insensitive): ubuntu, debian, dropbear, windows,
-                        macos
+                        sent as 'SSH-2.0-STRING' version banner - only first-
+                        glance deception, it can still be identified as
+                        asyncssh - presets (case-insensitive): ubuntu, debian,
+                        dropbear, windows, macos
   --pre-auth-banner STRING
                         banner shown to every client before login
   --post-auth-banner STRING
@@ -180,6 +192,15 @@ logging:
                         append the log to FILE (plain with timestamps)
   -t, --timestamps      prefix console lines with a timestamp
   --plain               disable ANSI colors on the console
+
+examples: (also check README on Github)
+  sshcatch                                   Log-only (capture creds)
+  sshcatch -u user:pass --scp-download       Allow one user to download via SCP/SFTP
+  sshcatch --open-auth --forward             Allow ANYONE! to tunnel through this SSH server
+  # My favorite one
+  #   Allows reverse tunnels and uploads via SCP for the keys in ./authorized_keys
+  #   while posing shallowly as an Ubuntu SSH server on port 2222
+  sshcatch --reverse --authorized-keys ./authorized-keys --scp-upload --version-banner ubuntu -p 2222
 ```
 
 ## License

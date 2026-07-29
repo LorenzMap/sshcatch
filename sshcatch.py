@@ -16,7 +16,7 @@ from itertools import count
 
 import asyncssh
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 # ── Logging ───────────────────────────────────────────────────────────
 
@@ -69,8 +69,8 @@ def log_auth(msg, success=False, addr=None, user=None, level=logging.WARNING):
 def log_scp(msg, addr=None, user=None, level=logging.INFO):
     _log("SCP", PURPLE, msg, addr, user, level)
 
-def log_tunnel(msg, addr=None, user=None):
-    _log("TUNNEL", CYAN, msg, addr, user, logging.WARNING)
+def log_tunnel(msg, addr=None, user=None, level=logging.WARNING):
+    _log("TUNNEL", CYAN, msg, addr, user, level)
 
 def log_info(msg, addr=None, user=None, level=logging.DEBUG):
     _log("*", BOLD, msg, addr, user, level)
@@ -108,10 +108,10 @@ class SFTPCatchServer(asyncssh.SFTPServer):
         self._last_log = (msg, time.monotonic())
         log_scp(msg, addr=self._addr, user=self._user, level=level)
 
-    def _deny(self, detail, reason="Not allowed"):
+    def _deny_sftp(self, detail, reason="Not allowed"):
         level = logging.INFO if reason == "Not allowed" else logging.WARNING
-        self._log_scp(f"DENIED {detail}", level)
-        raise asyncssh.SFTPPermissionDenied(reason)
+        self._log_scp(f"DENIED {detail} ({reason})", level)
+        raise asyncssh.SFTPPermissionDenied("Permission denied")
 
     def _execute_wrapped_log(self, path, fn, *args):
         try: return fn(*args)
@@ -122,7 +122,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
             self._log_scp(f"ERROR {self._local_path(path)} ({e.strerror or e})", logging.WARNING)
             raise
 
-    # ── path checks ──────────────────────────────────────────────
+    # ── path checks ───────────────────────────────────────────────
 
     def map_path(self, path):
         # Overwrite to be more secure than default implementation
@@ -133,7 +133,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
         # Prevent access to protected files in the scp dir
         rel = posixpath.normpath(posixpath.join(b"/", path)).lstrip(b"/")
         if os.fsdecode(rel) in self._protected_files:
-            self._deny(f"PROTECTED {self._local_path(path)}")
+            self._deny_sftp(f"PROTECTED {self._local_path(path)}")
 
     def _require_not_symlink(self, path):
         local = Path(os.fsdecode(self.map_path(path)))
@@ -141,7 +141,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
             # check if chroot root reached
             if component == Path(self._chroot_local): break  
             if component.is_symlink():
-                self._deny(f"SYMLINK {self._local_path(path)}", "Symlinks are not allowed")
+                self._deny_sftp(f"SYMLINK {self._local_path(path)}", "Symlinks are not allowed")
 
     def _unique_write_path(self, path):
         # Check if the upload overwrites something - keep subdirectories intact
@@ -183,9 +183,9 @@ class SFTPCatchServer(asyncssh.SFTPServer):
         is_write = bool(pflags & (0x02 | 0x04 | 0x08))  # WRITE|APPEND|CREAT
 
         if is_write and not self._allow_upload:
-            self._deny(f"WRITE {self._local_path(path)}", "Upload is disabled")
+            self._deny_sftp(f"WRITE {self._local_path(path)}", "Upload is disabled")
         if not is_write and not self._allow_download:
-            self._deny(f"READ {self._local_path(path)}", "Download is disabled")
+            self._deny_sftp(f"READ {self._local_path(path)}", "Download is disabled")
 
         # Prevent overwriting on upload
         if is_write:
@@ -233,7 +233,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
     def mkdir(self, path, attrs):
         # Allow (upload only): needed to create directories during recursive uploads
         if not self._allow_upload:
-            self._deny(f"MKDIR {self._local_path(path)}", "Upload is disabled")
+            self._deny_sftp(f"MKDIR {self._local_path(path)}", "Upload is disabled")
         self._require_not_protected(path)
         self._require_not_symlink(path)
         self._ensure_parent(path)
@@ -244,7 +244,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
     def symlink(self, old, new):
         # Allow (upload only): write a placeholder recording the target
         if not self._allow_upload:
-            self._deny(f"SYMLINK {self._local_path(new)}", "Upload is disabled")
+            self._deny_sftp(f"SYMLINK {self._local_path(new)}", "Upload is disabled")
         self._require_not_protected(new)
         self._require_not_symlink(new)
         new = self._unique_write_path(new)
@@ -257,7 +257,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
     def setstat(self, path, attrs):
         # Allow (upload only): perms/timestamps on uploaded files
         if not self._allow_upload:
-            self._deny(f"SETSTAT {self._local_path(path)}", "Upload is disabled")
+            self._deny_sftp(f"SETSTAT {self._local_path(path)}", "Upload is disabled")
         self._require_not_protected(path)
         self._require_not_symlink(path)
         result = self._execute_wrapped_log(path, super().setstat, path, attrs)
@@ -267,14 +267,14 @@ class SFTPCatchServer(asyncssh.SFTPServer):
     def fsetstat(self, file_obj, attrs):
         # Allow (upload only): same as setstat on an already-open handle
         if not self._allow_upload:
-            self._deny("FSETSTAT", "Upload is disabled")
+            self._deny_sftp("FSETSTAT", "Upload is disabled")
         self._log_scp("FSETSTAT", logging.DEBUG)
         return super().fsetstat(file_obj, attrs)
 
     def lsetstat(self, path, attrs):
         # Noop (upload only): set link's timestamps but we use placeholders (noop so uploads don't abort)
         if not self._allow_upload:
-            self._deny(f"LSETSTAT {self._local_path(path)}", "Upload is disabled")
+            self._deny_sftp(f"LSETSTAT {self._local_path(path)}", "Upload is disabled")
         self._log_scp(f"LSETSTAT {self._local_path(path)} (ignored)", logging.DEBUG)
 
     # write     - file upload after open
@@ -284,7 +284,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
     async def scandir(self, path):
         # Allow (download only): directory listing for recursive downloads
         if not self._allow_download:
-            self._deny(f"LISTDIR {self._local_path(path)}", "Download is disabled")
+            self._deny_sftp(f"LISTDIR {self._local_path(path)}", "Download is disabled")
         self._require_not_symlink(path)
         self._log_scp(f"LISTDIR {self._local_path_log(path)}", logging.DEBUG)
         # hide protected files and symlinks
@@ -305,51 +305,51 @@ class SFTPCatchServer(asyncssh.SFTPServer):
 
     def remove(self, path):
         # Deny: no deleting files
-        self._deny(f"DELETE {self._local_path(path)}")
+        self._deny_sftp(f"DELETE {self._local_path(path)}")
 
     def rename(self, old, new):
         # Deny: no moving or renaming
-        self._deny(f"RENAME {self._local_path(old)}")
+        self._deny_sftp(f"RENAME {self._local_path(old)}")
 
     def rmdir(self, path):
         # Deny: no removing directories
-        self._deny(f"RMDIR {self._local_path(path)}")
+        self._deny_sftp(f"RMDIR {self._local_path(path)}")
 
     def link(self, old, new):
         # Deny: no hard links
-        self._deny(f"LINK {self._local_path(old)}")
+        self._deny_sftp(f"LINK {self._local_path(old)}")
 
     def open56(self, path, desired_access, flags, attrs):
         # Deny: SFTPv4+ open (we use sftp_version=3 anyway)
-        self._deny(f"OPEN56 {self._local_path(path)}")
+        self._deny_sftp(f"OPEN56 {self._local_path(path)}")
 
     def readlink(self, path):
         # Deny: we deliberately dont use symlinks
-        self._deny(f"READLINK {self._local_path(path)}")
+        self._deny_sftp(f"READLINK {self._local_path(path)}")
 
     def posix_rename(self, oldpath, newpath):
         # Deny: no moving or renaming
-        self._deny(f"POSIX_RENAME {self._local_path(oldpath)}")
+        self._deny_sftp(f"POSIX_RENAME {self._local_path(oldpath)}")
 
     def statvfs(self, path):
         # Deny: leaks host filesystem stats (size/free space), not needed for transfers
-        self._deny(f"STATVFS {self._local_path(path)}")
+        self._deny_sftp(f"STATVFS {self._local_path(path)}")
 
     def fstatvfs(self, file_obj):
         # Deny: same as statvfs but on file handle
-        self._deny("FSTATVFS")
+        self._deny_sftp("FSTATVFS")
 
     def fsync(self, file_obj):
         # Deny: flush-to-disk on a handle; uploads complete fine without it.
-        self._deny("FSYNC")
+        self._deny_sftp("FSYNC")
 
     def lock(self, file_obj, offset, length, flags):
         # Deny: byte-range locks serve no purpose here and only add surface.
-        self._deny("LOCK")
+        self._deny_sftp("LOCK")
 
     def unlock(self, file_obj, offset, length):
         # Deny: see lock().
-        self._deny("UNLOCK")
+        self._deny_sftp("UNLOCK")
 
 
 # ── SSH server factory ────────────────────────────────────────────────
@@ -423,7 +423,7 @@ def make_server_factory(args, single_future=None):
             if exc: log_conn(f"Connection lost: {exc}", addr=self._addr, user=user, level=level)
             else: log_conn("Connection closed", addr=self._addr, user=user, level=level)
 
-        # -- banner ---------------------------------------------------
+        # ── banner ───────────────────────────────────────────────────
         
         def _send_banner(self, text):
             # Send auth messages so we never have to open a session 
@@ -446,7 +446,7 @@ def make_server_factory(args, single_future=None):
             except Exception: pass
             return await self._orig_send_success(*args, **kwargs)
 
-        # -- authentication -------------------------------------------
+        # ── authentication ───────────────────────────────────────────
 
         def public_key_auth_supported(self):
             # always accept offers so we can log them
@@ -485,23 +485,30 @@ def make_server_factory(args, single_future=None):
             if log_only: 
                 asyncio.get_running_loop().call_later(0.5, self._conn.close)
 
-        # -- tunneling ------------------------------------------------
+        # ── tunneling ────────────────────────────────────────────────
+
+        def _deny_tunnel(self, detail, reason="Not allowed"):
+            level = logging.INFO if reason == "Not allowed" else logging.WARNING
+            user = self._conn.get_extra_info("username")
+            log_tunnel(f"DENIED {detail} ({reason})", addr=self._addr, user=user, level=level)
+            return False
+
+        # ── ALLOWED (gated) ──────────────────────────────────────────
 
         def connection_requested(self, dest_host, dest_port, orig_host, orig_port):
-            user = self._conn.get_extra_info("username")
+            # Allow (--forward): direct TCP forward (client: ssh -NL / -ND)
+            route = f"{addr_str(orig_host, orig_port)} -> {addr_str(dest_host, dest_port)}"
             if not args.forward:
-                log_tunnel(f"DENIED forward {addr_str(orig_host, orig_port)} -> "
-                           f"{addr_str(dest_host, dest_port)}", addr=self._addr, user=user)
-                return False
-            log_tunnel(f"Forward {addr_str(orig_host, orig_port)} -> "
-                       f"{addr_str(dest_host, dest_port)}", addr=self._addr, user=user)
+                return self._deny_tunnel(f"forward {route}", "Forwarding is disabled")
+            user = self._conn.get_extra_info("username")
+            log_tunnel(f"Forward {route}", addr=self._addr, user=user)
             return True
 
         def server_requested(self, listen_host, listen_port):
-            user = self._conn.get_extra_info("username")
+            # Allow (--reverse): remote TCP listen (client: ssh -NR)
             if not args.reverse:
-                log_tunnel(f"DENIED reverse {addr_str(listen_host, listen_port)}", addr=self._addr, user=user)
-                return False
+                return self._deny_tunnel(f"reverse {addr_str(listen_host, listen_port)}", "Reverse is disabled")
+            user = self._conn.get_extra_info("username")
             log_tunnel(f"Reverse listen on {addr_str(listen_host, listen_port)}", addr=self._addr, user=user)
 
             def accept(orig_host, orig_port):
@@ -511,6 +518,25 @@ def make_server_factory(args, single_future=None):
                            f"{addr_str(listen_host, listen_port)}", addr=self._addr, user=user)
                 return True
             return accept
+
+        # ── DENIED forwarding/tunneling ──────────────────────────────
+        # asyncssh rejects these by default, override to deny anyway and log them
+
+        def unix_connection_requested(self, dest_path):
+            # Deny: direct UNIX-domain-socket forward (client: ssh -L /sock:...)
+            return self._deny_tunnel(f"unix-forward {dest_path}")
+
+        def unix_server_requested(self, listen_path):
+            # Deny: remote UNIX-domain-socket listen (client: ssh -R /sock:...)
+            return self._deny_tunnel(f"unix-reverse {listen_path}")
+
+        def tun_requested(self, unit):
+            # Deny: layer-3 TUN tunnel (client: ssh -w)
+            return self._deny_tunnel(f"tun unit={unit}")
+
+        def tap_requested(self, unit):
+            # Deny: layer-2 TAP tunnel
+            return self._deny_tunnel(f"tap unit={unit}")
 
     return SSHCatchServer, len(users), len(auth_keys_fps)
 
@@ -574,8 +600,8 @@ async def start_server(args):
             user = conn.get_extra_info("username") or "?"
             peer = conn.get_extra_info("peername")
             addr = addr_str(peer[0], peer[1]) if peer else "?"
-            log_scp("DENIED SFTP", addr=addr, user=user, level=logging.WARNING)
-            raise asyncssh.SFTPPermissionDenied("SCP/SFTP is disabled")
+            log_scp("DENIED SFTP (SCP/SFTP is disabled)", addr=addr, user=user, level=logging.WARNING)
+            raise asyncssh.SFTPPermissionDenied("Permission denied")
         opts["sftp_factory"] = denied_sftp
         # We allow logins however so we can log connections and credentials
         opts["allow_scp"] = True
@@ -642,37 +668,52 @@ VERSION_PRESETS = {
 _description="""\
 sshcatch - a quick-deploy SSH server for tunneling (local/remote/dynamic)
 and simple SCP transfers (NEVER opens a shell!).
-By default all features are disabled: connections are logged and
-closed. Use flags to enable features.
+By default all features are disabled. Use flags to enable features.
 """
 
-_epilog="""\
-examples:
-  %(prog)s                                           Log-only (capture creds)
-  %(prog)s -u user:pass --scp-download               Allow one user to download via SCP/SFTP
-  %(prog)s --open-auth --forward                     Allow ANYONE! to tunnel through this SSH server
+_epilog_short="""\
+Run '%(prog)s --help' for the full help!
+"""
+
+_epilog_full="""\
+examples: (also check README on Github)
+  %(prog)s                                   Log-only (capture creds)
+  %(prog)s -u user:pass --scp-download       Allow one user to download via SCP/SFTP
+  %(prog)s --open-auth --forward             Allow ANYONE! to tunnel through this SSH server
   # My favorite one
   #   Allows reverse tunnels and uploads via SCP for the keys in ./authorized_keys
-  #   while posing as an Ubuntu SSH server on port 2222
+  #   while posing shallowly as an Ubuntu SSH server on port 2222
   %(prog)s --reverse --authorized-keys ./authorized-keys --scp-upload --version-banner ubuntu -p 2222
 """
 
-def main():
+def build_parser(full=False):
+    # Help got to long so splitting it into '-h' and '--help'
+    def help_text(short_help=None, long_help=""):
+        if full: return (f"{short_help} " if short_help else "") + long_help
+        else: return short_help if short_help else argparse.SUPPRESS
+
     parser = argparse.ArgumentParser(
+        add_help=False,
         description=_description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_epilog)
-    parser.add_argument("--version", action="version",
-                        version=f"%(prog)s {__version__}")
+        epilog=_epilog_full if full else _epilog_short)
+
+    parser.add_argument("-h", action="help",
+                        help="show a short help message and exit")
+    parser.add_argument("--help", action="help",
+                        help="show the full help and exit")
     parser.add_argument("-p", "--port", type=int, default=22,
                         help="listen port (default: 22)")
     parser.add_argument("-b", "--bind", default="",
                         help="bind address (default: all IPv4/v6 interfaces)")
-    parser.add_argument("--host-key", metavar="FILE", type=Path,
-                        help="server host key file (default: auto-generate)")
     parser.add_argument("-1", "--single", action="store_true",
-                        help="close the listener after first successful authentication "
-                             "(and exit when that connection ends)")
+                        help=help_text(short_help="close the listener after first successful auth",
+                                       long_help="(and exit when that connection ends)"))
+    parser.add_argument("--host-key", metavar="FILE", type=Path,
+                        help=help_text(long_help="server host key file (default: auto-generate)"))
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__}", 
+                        help=help_text(long_help="show program's version number and exit"))
 
     auth = parser.add_argument_group("authentication")
     auth.add_argument("-u", "--user", action="append", metavar="USER:PASS",
@@ -690,38 +731,42 @@ def main():
 
     scp = parser.add_argument_group("SCP / SFTP file transfer")
     scp.add_argument("--scp-upload", action="store_true",
-                     help="enable file upload (SCP/SFTP write) - "
-                          "files get suffix instead of overwriting - "
-                          "symlinks become placeholder files")
+                     help=help_text(short_help="enable file upload (SCP/SFTP write)",
+                                    long_help="- files get suffix instead of overwriting"))
     scp.add_argument("--scp-download", action="store_true",
-                     help="enable file download (SCP/SFTP read) - "
-                          "symlinks are denied")
+                     help=help_text(short_help="enable file download (SCP/SFTP read)",
+                                    long_help="- symlinks are denied"))
     scp.add_argument("--scp-dir", default=Path.cwd(), metavar="DIR", type=Path,
-                     help="directory for SCP/SFTP (default: cwd) - "
-                          "sensitive files (host-key, authorized_keys, logfile) are protected")
+                     help=help_text(short_help="directory for SCP/SFTP (default: cwd)",
+                                    long_help="- sensitive sshcatch files (host-key, authorized_keys, logfile) are protected"))
 
     banners = parser.add_argument_group("banners")
     banners.add_argument("--version-banner", metavar="STRING",
-                         help="sent as 'SSH-2.0-STRING' version banner - "
-                             f"presets (case-insensitive): {', '.join(VERSION_PRESETS)}")
+                         help=help_text(long_help="sent as 'SSH-2.0-STRING' version banner - "
+                             "only first-glance deception, it can still be identified as asyncssh - "
+                             f"presets (case-insensitive): {', '.join(VERSION_PRESETS)}"))
     banners.add_argument("--pre-auth-banner", metavar="STRING",
-                         help="banner shown to every client before login")
+                         help=help_text(long_help="banner shown to every client before login"))
     banners.add_argument("--post-auth-banner", metavar="STRING",
-                         help="banner shown only to clients that authenticate successfully")
+                         help=help_text(long_help="banner shown only to clients that authenticate successfully"))
 
     logs = parser.add_argument_group("logging")
     verbosity = logs.add_mutually_exclusive_group()
     verbosity.add_argument("-q", "--quiet", action="store_true",
-                           help="print nothing on console")
+                           help=help_text(long_help="print nothing on console"))
     verbosity.add_argument("-v", "--verbose", action="count", default=0,
-                           help="print additional information to the console (repeatable)")
+                           help=help_text(long_help="print additional information to the console (repeatable)"))
     logs.add_argument("-o", "--output", metavar="FILE", type=Path,
-                      help="append the log to FILE (plain with timestamps)")
+                      help=help_text(long_help="append the log to FILE (plain with timestamps)"))
     logs.add_argument("-t", "--timestamps", action="store_true",
-                      help="prefix console lines with a timestamp")
+                      help=help_text(long_help="prefix console lines with a timestamp"))
     logs.add_argument("--plain", action="store_true",
-                      help="disable ANSI colors on the console")
+                      help=help_text(long_help="disable ANSI colors on the console"))
+    return parser
 
+
+def main():
+    parser = build_parser(full="--help" in sys.argv[1:])
     args = parser.parse_args()
 
     # Validate the log output path

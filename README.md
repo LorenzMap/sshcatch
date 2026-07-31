@@ -13,6 +13,28 @@ Built on [asyncssh](https://github.com/ronf/asyncssh).
 This is a pentesting tool. Only point it at systems and networks you are authorized 
 to test.
 
+## Why this tool exists
+
+- During engagements and CTFs I love to use 'simple' tools on my host that just work
+  - http-server -> `python3 -m http.server`
+  - smb-server -> `impacket-smbserver`
+  - ssh-server -> ??? (now `sshcatch`)
+
+- `sshd` can be used, but:
+  - configuring it through `sshd_configs` is a pain
+  - multiple use-cases require different configs (tunnel direction? sftp direction? different ports?) 
+  - logins are controlled by the OS so a user must be created (and secured)
+  - I want to restrict the shell so my host is safe
+
+- My solution: `sshcatch`
+  - Simply configure through clear flags and arguments on the commandline
+    - restrictive defaults, every feature must be enabled consciously
+  - Never allow shells (or commands)
+  - Forward/Reverse tunnels can be individually activated 
+  - SCP/SFTP file uploads and downloads can be individually activated
+    - restrictive upload handling to prevent overwriting
+    - symlinks denied
+
 ## Install
 
 With `pipx` (recommended, installs into an isolated environment and puts
@@ -36,8 +58,9 @@ cd sshcatch
 pipx install .          # or: pip install .
 ```
 
-Needs Python 3.10+. A host key is auto-generated in the working directory on
-first run (or point `--host-key` at your own).
+Needs Python 3.10+. Three host keys (ed25519, RSA, ECDSA) are auto-generated
+into a single file in the working directory on first run (or point `--host-key`
+at your own file).
 
 ## How it works
 
@@ -72,6 +95,18 @@ Uploads **never overwrite** an existing file. The new file gets a numeric suffix
 (`loot.tar` -> `loot_1.tar`). Non-existent parent folders are created.
 
 Renames, deletes and directory removal are denied.
+
+## Word of Warning
+
+Only using `--version-banner` obviously isn't enough deception because the KEXINIT
+that is transferred cleartext on the wire is a clear tell. This differing HASSH
+can be easily detected by a sufficiently sophisticated observer.
+
+Also: `sshcatch` is **NOT** designed to be a **honeypot**. Advanced deception, long-term logging 
+and everything else a real honeypot needs are deliberately out of scope. There are other
+projects that can be used: [Cowrie](https://github.com/cowrie/cowrie),
+[cyanide-framework](https://github.com/tanhiowyatt/cyanide-framework) and probably a lot more!
+
 
 ## Examples
 
@@ -148,7 +183,9 @@ options:
   -b BIND, --bind BIND  bind address (default: all IPv4/v6 interfaces)
   -1, --single          close the listener after first successful auth (and
                         exit when that connection ends)
-  --host-key FILE       server host key file (default: auto-generate)
+  --host-key FILE       server host key file, may hold several keys - auto-
+                        generated if missing - uses ./sshcatch_host_key by
+                        default
   --version             show program's version number and exit
 
 authentication:

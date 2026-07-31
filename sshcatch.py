@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import posixpath
+import re
 import sys
 import time
 from pathlib import Path
@@ -16,7 +17,7 @@ from itertools import count
 
 import asyncssh
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 # ── Logging ───────────────────────────────────────────────────────────
 
@@ -366,10 +367,11 @@ def make_server_factory(args, single_future=None):
     if args.authorized_keys:
         for i, line in enumerate(args.authorized_keys.read_text().splitlines(), 1):
             line = line.strip()
-            if not line or line.startswith('#'):
-                continue
+            if not line or line.startswith('#'): continue
+            key_only = re.search(r"^\S+ AAAA\S+", line)
             try:
-                k = asyncssh.import_public_key(line)
+                if not key_only: raise ValueError("Must start with 'keytype base64' (no options)")
+                k = asyncssh.import_public_key(key_only.group())
                 fp = k.get_fingerprint()
                 auth_keys_fps.add(fp)
                 log_info(f"Loaded key     line={i}  fingerprint={fp}")
@@ -543,24 +545,31 @@ def make_server_factory(args, single_future=None):
 
 # ── Server start ──────────────────────────────────────────────────────
 
+HOST_KEY_ALGS = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256")
+HOST_KEY_OPTS = {"ssh-rsa": {"key_size": 3072}}
+
+
 async def start_server(args):
-    # Handle Host key
+    # Handle Host keys
     key_path = args.host_key if args.host_key else Path.cwd()
-    if key_path.is_dir(): 
+    if key_path.is_dir():
         key_path = key_path / "sshcatch_host_key"
     if not key_path.parent.is_dir():
         raise FileNotFoundError(f"Host key directory does not exist: {key_path.parent}")
 
     if key_path.is_file():
-        host_key = asyncssh.read_private_key(str(key_path))
-        log_info(f"Read host key: {key_path}")
+        try: host_keys = asyncssh.read_private_key_list(str(key_path))
+        except ValueError as e: raise ValueError(f"Could not read host key file {key_path}: {e}") from None
+        if not host_keys: raise ValueError(f"No usable host key in {key_path}")
+        log_info(f"Read host key: {key_path} ({len(host_keys)} key{'s'*(len(host_keys)!=1)})")
     else:
-        host_key = asyncssh.generate_private_key("ssh-ed25519")
-        host_key.write_private_key(str(key_path))
-        log_info(f"Generated host key: {key_path}")
+        host_keys = [asyncssh.generate_private_key(a, **HOST_KEY_OPTS.get(a, {}))
+                     for a in HOST_KEY_ALGS]
+        key_path.write_bytes(b"".join(k.export_private_key() for k in host_keys))
+        log_info(f"Generated host keys file: {key_path}")
         if os.name == "posix": key_path.chmod(0o600)
         else: log_info("Please make sure the permissions on the host key are securely set!", level=logging.WARNING)
-    fingerprint = host_key.get_fingerprint()
+    fingerprints = [(k.get_algorithm(), k.get_fingerprint()) for k in host_keys]
 
     # for single-connection mode - resolving releases the bind on the listen port
     single_future = asyncio.get_running_loop().create_future() if args.single else None
@@ -569,7 +578,7 @@ async def start_server(args):
     server_factory, n_users, n_keys = make_server_factory(args, single_future)
     opts = {
         "server_factory": server_factory,
-        "server_host_keys": [host_key],
+        "server_host_keys": host_keys,
         # SFTPv3 only so all transfers use open() and not open56()
         "sftp_version": 3,
     }
@@ -636,8 +645,8 @@ async def start_server(args):
     summary.append(f"Version ....... SSH-2.0-{options.version.decode()}")
     if args.pre_auth_banner: summary.append(f"Pre-auth ...... {banner_preview(args.pre_auth_banner)}")
     if args.post_auth_banner: summary.append(f"Post-auth ..... {banner_preview(args.post_auth_banner)}")
-    summary.append(f"Host key ...... {fingerprint}")
     summary.append(f"Key file ...... {key_path}")
+    for algo, fp in fingerprints: summary.append(f"Host key ...... {fp} ({algo})")
     log_info("sshcatch\n" + "\n".join(f"  {line}" for line in summary), level=logging.WARNING)
 
     acceptor = await asyncssh.listen(host=args.bind, port=args.port, options=options)
@@ -687,7 +696,7 @@ examples: (also check README on Github)
 """
 
 def build_parser(full=False):
-    # Help got to long so splitting it into '-h' and '--help'
+    # Help got too long so splitting it into '-h' and '--help'
     def help_text(short_help=None, long_help=""):
         if full: return (f"{short_help} " if short_help else "") + long_help
         else: return short_help if short_help else argparse.SUPPRESS
@@ -710,7 +719,8 @@ def build_parser(full=False):
                         help=help_text(short_help="close the listener after first successful auth",
                                        long_help="(and exit when that connection ends)"))
     parser.add_argument("--host-key", metavar="FILE", type=Path,
-                        help=help_text(long_help="server host key file (default: auto-generate)"))
+                        help=help_text(long_help="server host key file, may hold several keys "
+                                       "- auto-generated if missing - uses ./sshcatch_host_key by default"))
     parser.add_argument("--version", action="version",
                         version=f"%(prog)s {__version__}", 
                         help=help_text(long_help="show program's version number and exit"))
@@ -803,9 +813,7 @@ def main():
         parser.error(f"Authorized-keys file not found: {args.authorized_keys}")
 
     try: asyncio.run(start_server(args))
-    except PermissionError:
-        parser.error(f"Permission denied - port {args.port} requires root")
-    except OSError as e:
+    except (OSError, ValueError) as e:
         parser.error(f"Could not start server: {e}")
     except KeyboardInterrupt:
         print()

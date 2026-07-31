@@ -4,6 +4,35 @@ All notable changes to **sshcatch** are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-07-31
+
+Multiple host keys now used as default.
+
+### Added
+
+- **Three host keys instead of one.** ed25519, RSA-3072 and ecdsa-nistp256 are
+  generated on first run if missing and stored together in one `sshcatch_host_key`
+  file, so clients can pick their algorithm. Existing key files are read with
+  `read_private_key_list()` and may hold any number of keys.
+
+### Changed
+
+- The startup summary prints the fingerprint of each key.
+- **Startup failures go through a single handler.** `PermissionError` is no longer
+  special-cased: it always blamed the port, even when the host key file was the
+  real problem. The underlying error is shown instead - it already names the
+  address and port.
+
+### Fixed
+
+- An empty, unreadable or passphrase-protected host key file now ends in a clean
+  error message instead of a traceback.
+- `authorized_keys` lines that do not start with a key say why they were refused.
+  Options in front of the key (`from="..."`, `restrict`, ...) remain unsupported -
+  sshcatch cannot enforce them, so such keys are rejected rather than silently
+  accepted without their restrictions.
+
+
 ## [0.2.1] - 2026-07-29
 
 Forwarding hardening and help/logging polish.

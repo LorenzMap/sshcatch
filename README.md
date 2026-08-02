@@ -1,5 +1,9 @@
 # sshcatch
 
+[![PyPI](https://img.shields.io/pypi/v/sshcatch)](https://pypi.org/project/sshcatch/)
+[![Python](https://img.shields.io/pypi/pyversions/sshcatch)](https://pypi.org/project/sshcatch/)
+[![License](https://img.shields.io/pypi/l/sshcatch)](https://github.com/LorenzMap/sshcatch/blob/main/LICENSE)
+
 A quick-deploy SSH server for tunneling (local/remote/dynamic) and simple SCP /
 SFTP transfers - it **never opens a shell**.
 

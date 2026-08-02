@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 sshcatch - a quick-deploy SSH server for tunneling (local/remote/dynamic)
-and simple SCP transfers (NEVER opens a shell!).
+and simple SCP/SFTP transfers (NEVER opens a shell!).
 """
 
 import argparse
 import asyncio
+import functools
 import logging
 import os
 import posixpath
@@ -17,7 +18,7 @@ from itertools import count
 
 import asyncssh
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 # ── Logging ───────────────────────────────────────────────────────────
 
@@ -252,8 +253,7 @@ class SFTPCatchServer(asyncssh.SFTPServer):
         self._ensure_parent(new)
         target = old.decode(errors="replace")
         Path(os.fsdecode(self.map_path(new))).write_text(f"symlink -> {target}\n")
-        self._log_scp(f"SYMLINK {self._local_path(new)} -> {target} (placeholder)",
-                      logging.WARNING)
+        self._log_scp(f"SYMLINK {self._local_path(new)} -> {target} (placeholder)", logging.WARNING)
 
     def setstat(self, path, attrs):
         # Allow (upload only): perms/timestamps on uploaded files
@@ -470,6 +470,11 @@ def make_server_factory(args, single_future=None):
             # always accept passwords so we can log them
             return True
 
+        def kbdint_auth_supported(self):
+            # force  publickey,password auth for mimic (drop keyboard-interactive)
+            if not args.mimic == "none": return False
+            return super().kbdint_auth_supported()
+            
         def validate_password(self, username, password):
             accepted = accept_password(username, password)
             if accepted:
@@ -545,9 +550,8 @@ def make_server_factory(args, single_future=None):
 
 # ── Server start ──────────────────────────────────────────────────────
 
-HOST_KEY_ALGS = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256")
-HOST_KEY_OPTS = {"ssh-rsa": {"key_size": 3072}}
-
+GENERATE_KEYS = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256")
+GENERATE_OPTS = {"ssh-rsa": {"key_size": 3072}}
 
 async def start_server(args):
     # Handle Host keys
@@ -563,13 +567,15 @@ async def start_server(args):
         if not host_keys: raise ValueError(f"No usable host key in {key_path}")
         log_info(f"Read host key: {key_path} ({len(host_keys)} key{'s'*(len(host_keys)!=1)})")
     else:
-        host_keys = [asyncssh.generate_private_key(a, **HOST_KEY_OPTS.get(a, {}))
-                     for a in HOST_KEY_ALGS]
+        host_keys = [asyncssh.generate_private_key(a, **GENERATE_OPTS.get(a, {})) for a in GENERATE_KEYS]
         key_path.write_bytes(b"".join(k.export_private_key() for k in host_keys))
         log_info(f"Generated host keys file: {key_path}")
         if os.name == "posix": key_path.chmod(0o600)
         else: log_info("Please make sure the permissions on the host key are securely set!", level=logging.WARNING)
-    fingerprints = [(k.get_algorithm(), k.get_fingerprint()) for k in host_keys]
+
+    # Choose which keys to expose and what host-key algorithms to advertise
+    exposed_keys, host_key_algs = select_host_keys(host_keys, args.mimic)
+    fingerprints = [(k.get_algorithm(), k.get_fingerprint()) for k in exposed_keys]
 
     # for single-connection mode - resolving releases the bind on the listen port
     single_future = asyncio.get_running_loop().create_future() if args.single else None
@@ -578,12 +584,15 @@ async def start_server(args):
     server_factory, n_users, n_keys = make_server_factory(args, single_future)
     opts = {
         "server_factory": server_factory,
-        "server_host_keys": host_keys,
+        "server_host_keys": exposed_keys,
         # SFTPv3 only so all transfers use open() and not open56()
         "sftp_version": 3,
     }
-    if args.version_banner: 
+    if args.version_banner:
         opts["server_version"] = args.version_banner
+    if args.mimic != "none":
+        opts.update(MIMIC_PRESETS[args.mimic][1])
+        apply_mimic_patches(args.mimic, host_key_algs)
 
     has_scp = args.scp_upload or args.scp_download
     if has_scp:
@@ -643,10 +652,12 @@ async def start_server(args):
     if args.single: summary.append("Mode .......... single-connection")
     if has_scp: summary.append(f"SCP dir ....... {args.scp_dir.resolve()}")
     summary.append(f"Version ....... SSH-2.0-{options.version.decode()}")
+    summary.append(f"Mimic ......... {args.mimic}")
     if args.pre_auth_banner: summary.append(f"Pre-auth ...... {banner_preview(args.pre_auth_banner)}")
     if args.post_auth_banner: summary.append(f"Post-auth ..... {banner_preview(args.post_auth_banner)}")
     summary.append(f"Key file ...... {key_path}")
     for algo, fp in fingerprints: summary.append(f"Host key ...... {fp} ({algo})")
+    summary.append(f"\n")
     log_info("sshcatch\n" + "\n".join(f"  {line}" for line in summary), level=logging.WARNING)
 
     acceptor = await asyncssh.listen(host=args.bind, port=args.port, options=options)
@@ -665,18 +676,124 @@ async def start_server(args):
 
 # ── Main ──────────────────────────────────────────────────────────────
 
-# Quick --version-banner presets: keyword -> realistic 'SSH-2.0-<value>' banner.
-VERSION_PRESETS = {
-    "ubuntu":   "OpenSSH_9.6p1 Ubuntu-3ubuntu13.5",
-    "debian":   "OpenSSH_9.2p1 Debian-2+deb12u3",
-    "dropbear": "dropbear_2022.83",
-    "windows":  "OpenSSH_for_Windows_9.5",
-    "macos":    "OpenSSH_9.8",
+# ── Mimic presets ─────────────────────────────────────────────────────
+# - algorithm lists below shape the cleartext KEXINIT
+# - apply_mimic_patches() handles the monkey-patches of asyncssh
+# - for full reasoning see 'mimic-refs/mimic-notes.md'
+
+DEBIAN_ALGS = {
+    "kex_algs": ["curve25519-sha256", "curve25519-sha256@libssh.org",
+                 "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+                 "diffie-hellman-group-exchange-sha256", "diffie-hellman-group16-sha512",
+                 "diffie-hellman-group18-sha512", "diffie-hellman-group14-sha256"],
+    "encryption_algs": ["chacha20-poly1305@openssh.com", "aes128-ctr", "aes192-ctr",
+                        "aes256-ctr", "aes128-gcm@openssh.com", "aes256-gcm@openssh.com"],
+    "mac_algs": ["umac-64-etm@openssh.com", "umac-128-etm@openssh.com",
+                 "hmac-sha2-256-etm@openssh.com", "hmac-sha2-512-etm@openssh.com",
+                 "hmac-sha1-etm@openssh.com", "umac-64@openssh.com", "umac-128@openssh.com",
+                 "hmac-sha2-256", "hmac-sha2-512", "hmac-sha1"],
+    "compression_algs": ["none", "zlib@openssh.com"],
+    "signature_algs": ["ssh-ed25519", "sk-ssh-ed25519@openssh.com", "ssh-rsa",
+                       "rsa-sha2-256", "rsa-sha2-512", "ssh-dss",
+                       "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                       "sk-ecdsa-sha2-nistp256@openssh.com",
+                       "webauthn-sk-ecdsa-sha2-nistp256@openssh.com"],
 }
+
+DROPBEAR_ALGS = {
+    "kex_algs": ["curve25519-sha256", "curve25519-sha256@libssh.org",
+                 "ecdh-sha2-nistp521", "ecdh-sha2-nistp384", "ecdh-sha2-nistp256",
+                 "diffie-hellman-group14-sha256", "diffie-hellman-group14-sha1"],
+    "encryption_algs": ["chacha20-poly1305@openssh.com", "aes128-ctr", "aes256-ctr"],
+    "mac_algs": ["hmac-sha1", "hmac-sha2-256"],
+    "compression_algs": ["zlib@openssh.com", "none"],
+    "signature_algs": ["ssh-ed25519", "sk-ssh-ed25519@openssh.com",
+                       "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                       "sk-ecdsa-sha2-nistp256@openssh.com", "rsa-sha2-256", "ssh-rsa"],
+}
+
+MIMIC_PRESETS = {
+    "debian":   ("OpenSSH_8.4p1 Debian-5+deb11u7", DEBIAN_ALGS),   # Debian 11 (bullseye)
+    "dropbear": ("dropbear_2024.86", DROPBEAR_ALGS),               # Dropbear 2024.86
+    "none":     None                                               # asyncssh defaults
+}
+
+ADVERTISED_HOSTKEY_ALGS = {
+    "ssh-ed25519":         [b"ssh-ed25519"],
+    "ecdsa-sha2-nistp256": [b"ecdsa-sha2-nistp256"],
+    "ssh-rsa":             [b"rsa-sha2-512", b"rsa-sha2-256", b"ssh-rsa"],
+}
+
+MIMIC_HOSTKEYS = {
+    "debian":   ["ssh-rsa", "ecdsa-sha2-nistp256", "ssh-ed25519"],      # debian: rsa+ecdsa+ed25519
+    "dropbear": ["ssh-ed25519"],                                        # dropbear: ed25519 only
+}
+
+
+def select_host_keys(host_keys, mimic):
+    # Select fitting host keys for the mimicked server and order them in the default way
+    keys_by_algo = {k.get_algorithm(): k for k in host_keys}
+    wanted = MIMIC_HOSTKEYS.get(mimic, [])
+    missing = [a for a in wanted if a not in keys_by_algo]
+    if missing:
+        log_info(f"Host-keys missing: {missing} - a real {mimic} server provides "
+                 f"those (delete the host-key file to auto-generate all types)",
+                 level=logging.WARNING)
+    order = [a for a in wanted if a in keys_by_algo]
+    # return (keys_to_expose, advertised_algs)
+    if not order: return host_keys, None
+    return ([keys_by_algo[a] for a in order],
+            [alg for a in order for alg in ADVERTISED_HOSTKEY_ALGS[a]])
+
+
+def apply_mimic_patches(mimic, host_key_algs=None):
+    # Monkey-patch asyncssh internals so the cleartext/pre-auth transport matches the mimicked server
+    from asyncssh.connection import SSHConnection, SSHServerConnection
+    from asyncssh.constants import MSG_IGNORE
+
+    def wrap(cls, name, fn):
+        orig = getattr(cls, name, None)
+        if orig is None:
+            raise RuntimeError(
+                f"Cannot apply --mimic {mimic}: asyncssh internal '{name}' changed. "
+                f"Refusing to run a fingerprintable disguise (use '--mimic none' to bypass)")
+        setattr(cls, name, functools.partialmethod(fn, orig))
+
+    def kex(self, orig):
+        # 1. Modify KEXINIT to match mimicked server
+        algs = [a for a in orig(self) if a != b"ext-info-s"]
+        if self.is_server() and mimic == "dropbear":
+            algs = [b"kexguess2@matt.ucc.asn.au"] + algs
+        return algs
+    wrap(SSHConnection, "_get_extra_kex_algs", kex)
+
+    def ext_info(self, orig):
+        # 2. Strip asyncssh 'global-requests-ok' from EXT_INFO
+        self._extensions_to_send.pop(b"global-requests-ok", None)
+        return orig(self)
+    wrap(SSHConnection, "_send_ext_info", ext_info)
+
+    def send_packet(self, orig, pkttype, *a, **kw):
+        # 3. Suppress asyncssh's SSH_MSG_IGNORE traffic-analysis chaff (added with
+        #   OpenSSH 9.5). Safe to drop all because asyncssh only sends MSG_IGNORE
+        #   as this chaff using self.send_packet() before each real packet
+        if pkttype != MSG_IGNORE:
+            return orig(self, pkttype, *a, **kw)
+    wrap(SSHConnection, "send_packet", send_packet)
+
+    if host_key_algs is not None:
+        # 4. Pin the advertised server host-key algorithms
+        algs = list(host_key_algs)
+        def init(self, orig, *a, **kw):
+            orig(self, *a, **kw)
+            self._server_host_key_algs = [x for x in algs if x in self._server_host_keys]
+        wrap(SSHServerConnection, "__init__", init)
+
+# ── Startup and arguments ─────────────────────────────────────────────
 
 _description="""\
 sshcatch - a quick-deploy SSH server for tunneling (local/remote/dynamic)
-and simple SCP transfers (NEVER opens a shell!).
+and simple SCP/SFTP transfers (NEVER opens a shell!)
 By default all features are disabled. Use flags to enable features.
 """
 
@@ -691,8 +808,7 @@ examples: (also check README on Github)
   %(prog)s --open-auth --forward             Allow ANYONE! to tunnel through this SSH server
   # My favorite one
   #   Allows reverse tunnels and uploads via SCP for the keys in ./authorized_keys
-  #   while posing shallowly as an Ubuntu SSH server on port 2222
-  %(prog)s --reverse --authorized-keys ./authorized-keys --scp-upload --version-banner ubuntu -p 2222
+  %(prog)s --reverse --authorized-keys ./authorized_keys --scp-upload -p 2222
 """
 
 def build_parser(full=False):
@@ -718,6 +834,13 @@ def build_parser(full=False):
     parser.add_argument("-1", "--single", action="store_true",
                         help=help_text(short_help="close the listener after first successful auth",
                                        long_help="(and exit when that connection ends)"))
+    parser.add_argument("--mimic", metavar="PRESET", type=str.lower,
+                         choices=list(MIMIC_PRESETS), default="none",
+                         help=help_text(long_help="pose as another SSH server "
+                                        f"- presets (case-insensitive): {', '.join(list(MIMIC_PRESETS))} "
+                                        "- match the preset's pre-auth (banner, KEXINIT, server-sig-algs, ...) "
+                                        "exactly - banner can be overridden by --version-banner "
+                                        "- check Github repository for details"))
     parser.add_argument("--host-key", metavar="FILE", type=Path,
                         help=help_text(long_help="server host key file, may hold several keys "
                                        "- auto-generated if missing - uses ./sshcatch_host_key by default"))
@@ -752,9 +875,7 @@ def build_parser(full=False):
 
     banners = parser.add_argument_group("banners")
     banners.add_argument("--version-banner", metavar="STRING",
-                         help=help_text(long_help="sent as 'SSH-2.0-STRING' version banner - "
-                             "only first-glance deception, it can still be identified as asyncssh - "
-                             f"presets (case-insensitive): {', '.join(VERSION_PRESETS)}"))
+                         help=help_text(long_help="manually set 'SSH-2.0-STRING' version banner"))
     banners.add_argument("--pre-auth-banner", metavar="STRING",
                          help=help_text(long_help="banner shown to every client before login"))
     banners.add_argument("--post-auth-banner", metavar="STRING",
@@ -791,10 +912,9 @@ def main():
     configure_logging(output=args.output, timestamps=args.timestamps,
                       plain=args.plain, console_level=console_level)
 
-    # Handle version-banner presets
-    if args.version_banner:
-        args.version_banner = VERSION_PRESETS.get(
-            args.version_banner.lower(), args.version_banner)
+    # Handle --mimic version-banner
+    if args.mimic != "none" and not args.version_banner:
+        args.version_banner = MIMIC_PRESETS[args.mimic][0]
 
     # Validate user format
     if args.user:
@@ -815,6 +935,8 @@ def main():
     try: asyncio.run(start_server(args))
     except (OSError, ValueError) as e:
         parser.error(f"Could not start server: {e}")
+    except RuntimeError as e:
+        parser.error(str(e))
     except KeyboardInterrupt:
         print()
 

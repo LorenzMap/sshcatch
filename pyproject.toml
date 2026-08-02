@@ -25,7 +25,8 @@ classifiers = [
     "Topic :: Security",
     "Topic :: System :: Networking",
 ]
-dependencies = ["asyncssh>=2.21.0,<2.25.0"]
+# Pinned exactly due to mimic monkey-patches on asyncssh internals (see mimic-refs/mimic-notes.md)
+dependencies = ["asyncssh==2.24.0"]
 
 [project.urls]
 Homepage = "https://github.com/LorenzMap/sshcatch"
@@ -40,3 +41,6 @@ path = "sshcatch.py"
 
 [tool.hatch.build.targets.wheel]
 only-include = ["sshcatch.py"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["sshcatch.py", "README.md", "CHANGELOG.md", "LICENSE"]

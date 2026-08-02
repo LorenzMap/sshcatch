@@ -24,7 +24,7 @@ to test.
   - configuring it through `sshd_configs` is a pain
   - multiple use-cases require different configs (tunnel direction? sftp direction? different ports?) 
   - logins are controlled by the OS so a user must be created (and secured)
-  - I want to restrict the shell so my host is safe
+  - ForceCommands need to be set up to restrict the shell
 
 - My solution: `sshcatch`
   - Simply configure through clear flags and arguments on the commandline
@@ -98,9 +98,12 @@ Renames, deletes and directory removal are denied.
 
 ## Word of Warning
 
-Only using `--version-banner` obviously isn't enough deception because the KEXINIT
-that is transferred cleartext on the wire is a clear tell. This differing HASSH
-can be easily detected by a sufficiently sophisticated observer.
+Only using `--version-banner` obviously isn't enough deception against a sufficiently
+sophisticated observer because some of the data transferred in cleartext on the wire
+during connection establishment is a clear tell. Use `--mimic` if that's something you
+want to try and dodge in an engagement. Check out
+[`mimic-refs/mimic-notes.md`](https://github.com/LorenzMap/sshcatch/blob/main/mimic-refs/mimic-notes.md)
+for details about `--mimic`.
 
 Also: `sshcatch` is **NOT** designed to be a **honeypot**. Advanced deception, long-term logging 
 and everything else a real honeypot needs are deliberately out of scope. There are other
@@ -139,7 +142,7 @@ and saving them into a file:
 
 ```
 # Server
-sshcatch -1 -u arthur:42 --version-banner debian \
+sshcatch -1 -u arthur:42 --version-banner 'heart_of_gold' \
          --pre-auth-banner "What is the answer to life the universe and everything" \
          --post-auth-banner "flag{So_Long_and_Thanks_for_All_the_Fish}" \
          -o sshcatch.log -t
@@ -147,11 +150,11 @@ sshcatch -1 -u arthur:42 --version-banner debian \
 
 
 My favorite one: Reverse tunnel and SCP uploads for the keys in
-`./authorized-keys` while posing as an Ubuntu SSH server on port 2222:
+`./authorized_keys` on port 2222:
 
 ```
 # Server
-sshcatch --reverse --authorized-keys ./authorized-keys --scp-upload --version-banner ubuntu -p 2222
+sshcatch --reverse --authorized-keys ./authorized_keys --scp-upload -p 2222
 
 # Client
 ssh -NR 9000:localhost:22 user@host -p 2222     # reverse tunnel
@@ -165,15 +168,15 @@ scp -P 2222 loot.tar user@host:.                # upload
 The full reference below is `sshcatch --help`:
 
 ```
-usage: sshcatch [-h] [--help] [-p PORT] [-b BIND] [-1] [--host-key FILE]
-                [--version] [-u USER:PASS] [--open-auth]
+usage: sshcatch [-h] [--help] [-p PORT] [-b BIND] [-1] [--mimic PRESET]
+                [--host-key FILE] [--version] [-u USER:PASS] [--open-auth]
                 [--authorized-keys FILE] [--forward] [--reverse]
                 [--scp-upload] [--scp-download] [--scp-dir DIR]
                 [--version-banner STRING] [--pre-auth-banner STRING]
                 [--post-auth-banner STRING] [-q | -v] [-o FILE] [-t] [--plain]
 
 sshcatch - a quick-deploy SSH server for tunneling (local/remote/dynamic)
-and simple SCP transfers (NEVER opens a shell!).
+and simple SCP/SFTP transfers (NEVER opens a shell!)
 By default all features are disabled. Use flags to enable features.
 
 options:
@@ -183,6 +186,11 @@ options:
   -b BIND, --bind BIND  bind address (default: all IPv4/v6 interfaces)
   -1, --single          close the listener after first successful auth (and
                         exit when that connection ends)
+  --mimic PRESET        pose as another SSH server - presets (case-
+                        insensitive): debian, dropbear, none - match the
+                        preset's pre-auth (banner, KEXINIT, server-sig-algs,
+                        ...) exactly - banner can be overridden by --version-
+                        banner - check Github repository for details
   --host-key FILE       server host key file, may hold several keys - auto-
                         generated if missing - uses ./sshcatch_host_key by
                         default
@@ -211,10 +219,7 @@ SCP / SFTP file transfer:
 
 banners:
   --version-banner STRING
-                        sent as 'SSH-2.0-STRING' version banner - only first-
-                        glance deception, it can still be identified as
-                        asyncssh - presets (case-insensitive): ubuntu, debian,
-                        dropbear, windows, macos
+                        manually set 'SSH-2.0-STRING' version banner
   --pre-auth-banner STRING
                         banner shown to every client before login
   --post-auth-banner STRING
@@ -236,8 +241,7 @@ examples: (also check README on Github)
   sshcatch --open-auth --forward             Allow ANYONE! to tunnel through this SSH server
   # My favorite one
   #   Allows reverse tunnels and uploads via SCP for the keys in ./authorized_keys
-  #   while posing shallowly as an Ubuntu SSH server on port 2222
-  sshcatch --reverse --authorized-keys ./authorized-keys --scp-upload --version-banner ubuntu -p 2222
+  sshcatch --reverse --authorized-keys ./authorized_keys --scp-upload -p 2222
 ```
 
 ## License

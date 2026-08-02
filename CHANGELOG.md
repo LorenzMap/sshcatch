@@ -4,6 +4,35 @@ All notable changes to **sshcatch** are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-02
+
+Pose as another SSH server.
+
+### Added
+
+- **`--mimic debian` / `--mimic dropbear`** poses as a real OpenSSH 8.4p1 (Debian 11) or
+  Dropbear 2024.86 server: version banner, KEXINIT/HASSH, offered host keys and auth
+  methods match a capture of the real server. After authentication `sshcatch` differs from a
+  real server anyway, so `--mimic` only works pre-auth. Every modification to asyncssh,
+  the reasoning and the captures are in
+  [`mimic-refs/mimic-notes.md`](https://github.com/LorenzMap/sshcatch/blob/main/mimic-refs/mimic-notes.md).
+- `select_host_keys()` offers only the host-key types the mimicked server has, in its order.
+
+### Changed
+
+- **asyncssh is pinned to 2.24.0 exactly** - `--mimic` patches library internals, so a
+  different version could break the disguise silently. If a patched internal is gone,
+  sshcatch refuses to start.
+- The sdist ships only what is needed to install the package (no `mimic-refs/`).
+- The startup summary shows the active mimic preset.
+
+### Removed
+
+- **`--version-banner` presets** (`ubuntu`, `debian`, `dropbear`, `windows`, `macos`)
+  are dropped and the flag now takes a literal string only, `--mimic` sets a fitting
+  banner itself.
+
+
 ## [0.2.2] - 2026-07-31
 
 Multiple host keys now used as default.

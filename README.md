@@ -248,6 +248,15 @@ examples: (also check README on Github)
   sshcatch --reverse --authorized-keys ./authorized_keys --scp-upload -p 2222
 ```
 
+## Testing
+
+- the test suite lives in `tests/` (pytest)
+- run it from a virtualenv with the dev
+dependencies installed (`pytest`, `coverage`, `asyncssh`) 
+- the interop tests also need the OpenSSH client tools and `sshpass` on `PATH`
+- run via `python -m pytest` or `tests/test.sh`
+- for get the coverage of the tests run `tests/test.sh cov`
+
 ## License
 
 MIT

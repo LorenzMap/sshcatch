@@ -28,6 +28,19 @@ classifiers = [
 # Pinned exactly due to mimic monkey-patches on asyncssh internals (see mimic-refs/mimic-notes.md)
 dependencies = ["asyncssh==2.24.0"]
 
+[dependency-groups]
+dev = ["pytest>=8", "coverage>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["sshcatch"]
+parallel = true
+sigterm = true
+branch = true
+
 [project.urls]
 Homepage = "https://github.com/LorenzMap/sshcatch"
 Repository = "https://github.com/LorenzMap/sshcatch"
